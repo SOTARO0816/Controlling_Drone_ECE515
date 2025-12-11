@@ -2,11 +2,10 @@
 
 Please open the following files:
 
-- `index.html`: Interactive browser demo
-- `report.docx`: Full technical explanation
+- `Demo_Drone.html`: Interactive browser demo
+- `Notebook_of_project_ECE515_SotarKOIZUMI.docx`: Full technical explanation
 
 How to run:
-1. Download the repository
-2. Open `index.html` in your browser
-3. Run the simulation
+1. Open `index.html` in your browser
+2. Run the simulation
 
