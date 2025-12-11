@@ -6,6 +6,7 @@ Please open the following files:
 - `Notebook_of_project_ECE515_SotarKOIZUMI.docx`: Full technical explanation
 
 How to run:
-1. Open `Demo_Drone.html` in your browser
-2. Run the simulation
+1. Download this folder 
+2. Open `Demo_Drone.html` in your browser
+3. Run the simulation
 
