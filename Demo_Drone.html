@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Drone Attitude LQR Demo</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: sans-serif; margin: 20px; }
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      max-width: 750px;
+      margin-bottom: 10px;
+    }
+    .control-group { display: flex; flex-direction: column; font-size: 14px; }
+    .control-group label { margin-bottom: 4px; }
+    .slider-value { font-weight: bold; margin-left: 6px; }
+    #runBtn { margin-top: 10px; padding: 6px 12px; }
+    table {
+      border-collapse: collapse;
+      margin-top: 10px;
+      max-width: 600px;
+    }
+    th, td {
+      border: 1px solid #ccc;
+      padding: 4px 8px;
+      font-size: 13px;
+      text-align: left;
+    }
+    th { background: #f0f0f0; }
+    canvas { max-width: 900px; margin-top: 20px; }
+    #animCanvas { border: 1px solid #ccc; background: #f9f9f9; }
+  </style>
+</head>
+<body>
+
+<h1>Drone Attitude LQR Demo (Roll &amp; Pitch)</h1>
+
+<p>
+  Infinite-horizon LQR applied to a simplified drone attitude model.
+  Tune parameters and observe angle response, angular rates, control inputs,
+  rotor forces, and the drone animation.
+</p>
+
+<!-- ---------------- SLIDERS ---------------- -->
+<div class="controls">
+
+  <div class="control-group">
+    <label>Mass m [kg]: <span id="massVal" class="slider-value">1.0</span></label>
+    <input type="range" id="mass" min="0.1" max="5" step="0.1" value="1.0">
+  </div>
+
+  <div class="control-group">
+    <label>Arm length l [m]: <span id="armLenVal" class="slider-value">0.20</span></label>
+    <input type="range" id="armLen" min="0.05" max="0.5" step="0.01" value="0.20">
+  </div>
+
+  <div class="control-group">
+    <label>Initial roll φ₀ [deg]: <span id="phi0Val" class="slider-value">30</span></label>
+    <input type="range" id="phi0" min="-45" max="45" step="1" value="30">
+  </div>
+
+  <div class="control-group">
+    <label>Initial pitch θ₀ [deg]: <span id="theta0Val" class="slider-value">-30</span></label>
+    <input type="range" id="theta0" min="-45" max="45" step="1" value="-30">
+  </div>
+
+  <div class="control-group">
+    <label>h₁ (angle cost) [1/rad]: <span id="h1Val" class="slider-value">1.0</span></label>
+    <input type="range" id="h1" min="0" max="10" step="0.1" value="1.0">
+  </div>
+
+  <div class="control-group">
+    <label>h₂ (rate cost) [s/rad]: <span id="h2Val" class="slider-value">0.5</span></label>
+    <input type="range" id="h2" min="0" max="10" step="0.1" value="0.5">
+  </div>
+
+  <div class="control-group">
+    <label>r (input cost) [s²/rad]: <span id="rVal" class="slider-value">0.5</span></label>
+    <input type="range" id="r" min="0.1" max="10" step="0.1" value="0.5">
+  </div>
+
+</div>
+
+<button id="runBtn">Run simulation</button>
+
+<!-- ---------------- PARAMETER TABLE ---------------- -->
+<h2>Key parameters</h2>
+<table>
+  <thead>
+    <tr><th>Symbol</th><th>Description</th><th>Value</th><th>Unit</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>m</td><td>Mass</td><td id="tbl_m">-</td><td>kg</td></tr>
+    <tr><td>l</td><td>Arm length</td><td id="tbl_l">-</td><td>m</td></tr>
+    <tr><td>Jx = Jy</td><td>Roll/Pitch inertia</td><td id="tbl_J">-</td><td>kg·m²</td></tr>
+    <tr><td>V</td><td>Cost value</td><td id="tbl_V">-</td><td>–</td></tr>
+  </tbody>
+</table>
+
+<!-- ---------------- CHARTS ---------------- -->
+<h2>Angle response</h2>
+<canvas id="respChart"></canvas>
+
+<h2>Angular rates</h2>
+<canvas id="rateChart"></canvas>
+
+<h2>Control inputs (angular accelerations)</h2>
+<canvas id="uChart"></canvas>
+
+<h2>Control forces</h2>
+<canvas id="fChart"></canvas>
+
+<!-- ---------------- ANIMATION ---------------- -->
+<h2>Attitude animation</h2>
+<canvas id="animCanvas" width="400" height="300"></canvas>
+
+<!-- ---------------- JAVASCRIPT ---------------- -->
+<script>
+  const SIM_T = 5.0;
+  const DT    = 0.01;
+
+  // ---------- slider labels ----------
+  function bindSlider(id, labelId, fmt = v => v) {
+    const slider = document.getElementById(id);
+    const label  = document.getElementById(labelId);
+    const update = () => { label.textContent = fmt(slider.value); };
+    slider.addEventListener("input", update);
+    update();
+  }
+  bindSlider("mass",   "massVal",   v => (+v).toFixed(1));
+  bindSlider("armLen", "armLenVal", v => (+v).toFixed(2));
+  bindSlider("phi0",   "phi0Val");
+  bindSlider("theta0", "theta0Val");
+  bindSlider("h1",     "h1Val");
+  bindSlider("h2",     "h2Val");
+  bindSlider("r",      "rVal");
+
+  // ---------- Chart helper (x 軸を linear にする) ----------
+  function makeChart(canvasId, yLabel) {
+    return new Chart(document.getElementById(canvasId), {
+      type: "line",
+      data: { datasets: [] },
+      options: {
+        responsive: true,
+        interaction: { mode: "index", intersect: false },
+        parsing: false,
+        scales: {
+          x: {
+            type: "linear",
+            min: 0,
+            max: SIM_T,
+            title: { display: true, text: "Time [s]" },
+            ticks: { stepSize: 0.5 }   // ★ 0.5刻み
+          },
+          y: {
+            title: { display: true, text: yLabel }
+          }
+        }
+      }
+    });
+  }
+
+  const respChart = makeChart("respChart", "Angle [deg]");
+  respChart.data.datasets = [
+    { label: "φ [deg]", data: [], borderWidth: 2, fill: false },
+    { label: "θ [deg]", data: [], borderWidth: 2, fill: false }
+  ];
+
+  const rateChart = makeChart("rateChart", "Angular rate [rad/s]");
+  rateChart.data.datasets = [
+    { label: "p [rad/s]", data: [], borderWidth: 2, fill: false },
+    { label: "q [rad/s]", data: [], borderWidth: 2, fill: false }
+  ];
+
+  const uChart = makeChart("uChart", "Input [rad/s²]");
+  uChart.data.datasets = [
+    { label: "uφ [rad/s²]", data: [], borderWidth: 2, fill: false },
+    { label: "uθ [rad/s²]", data: [], borderWidth: 2, fill: false }
+  ];
+
+  const fChart = makeChart("fChart", "Force [N]");
+  fChart.data.datasets = [
+    { label: "Fφ [N]", data: [], borderWidth: 2, fill: false },
+    { label: "Fθ [N]", data: [], borderWidth: 2, fill: false }
+  ];
+
+  // ---------- Animation ----------
+  const animCanvas = document.getElementById("animCanvas");
+  const ctxA       = animCanvas.getContext("2d");
+  let rotorSpin    = 0;
+  let animTimer    = null;
+
+  function drawDrone(phi, theta, t) {
+    const w = animCanvas.width, h = animCanvas.height;
+    const cx = w / 2, cy = h / 2;
+    ctxA.clearRect(0, 0, w, h);
+
+    const L = 70;
+    const rotors = [
+      [ L, 0, 0],
+      [ 0, L, 0],
+      [-L, 0, 0],
+      [ 0,-L, 0]
+    ];
+
+    const cphi = Math.cos(phi),   sphi = Math.sin(phi);
+    const cth  = Math.cos(theta), sth  = Math.sin(theta);
+
+    function R(v) {
+      let x = v[0], y = v[1], z = v[2];
+      let y1 = cphi * y - sphi * z;
+      let z1 = sphi * y + cphi * z;
+      let x1 = x;
+      let x2 =  cth * x1 + sth * z1;
+      let y2 =  y1;
+      let z2 = -sth * x1 + cth * z1;
+      return [cx + x2, cy - z2];
+    }
+
+    // arms
+    ctxA.strokeStyle = "#444";
+    ctxA.lineWidth   = 3;
+    let p0 = R(rotors[0]), p2 = R(rotors[2]);
+    ctxA.beginPath(); ctxA.moveTo(p0[0], p0[1]); ctxA.lineTo(p2[0], p2[1]); ctxA.stroke();
+    let p1 = R(rotors[1]), p3 = R(rotors[3]);
+    ctxA.beginPath(); ctxA.moveTo(p1[0], p1[1]); ctxA.lineTo(p3[0], p3[1]); ctxA.stroke();
+
+    // body
+    const B = 25;
+    const bodyCorners = [
+      [ B, B,0],
+      [-B, B,0],
+      [-B,-B,0],
+      [ B,-B,0]
+    ];
+    ctxA.beginPath();
+    ctxA.fillStyle = "#dddddd";
+    let c0 = R(bodyCorners[0]); ctxA.moveTo(c0[0], c0[1]);
+    for (let i = 1; i < bodyCorners.length; i++) {
+      let c = R(bodyCorners[i]);
+      ctxA.lineTo(c[0], c[1]);
+    }
+    ctxA.closePath();
+    ctxA.fill();
+    ctxA.strokeStyle = "#999";
+    ctxA.stroke();
+
+    // rotors
+    ctxA.lineWidth = 2;
+    for (let i = 0; i < 4; i++) {
+      let [rx, ry] = R(rotors[i]);
+      ctxA.beginPath();
+      ctxA.arc(rx, ry, 7, 0, 2 * Math.PI);
+      ctxA.fillStyle = (i === 0 ? "#c00" : "#07c");
+      ctxA.fill(); ctxA.stroke();
+
+      let bladeLen = 10;
+      let a  = rotorSpin;
+      let dx = Math.cos(a) * bladeLen;
+      let dy = Math.sin(a) * bladeLen;
+      ctxA.beginPath();
+      ctxA.moveTo(rx - dx, ry - dy);
+      ctxA.lineTo(rx + dx, ry + dy);
+      ctxA.stroke();
+
+      let a2 = a + Math.PI / 2;
+      dx = Math.cos(a2) * bladeLen;
+      dy = Math.sin(a2) * bladeLen;
+      ctxA.beginPath();
+      ctxA.moveTo(rx - dx, ry - dy);
+      ctxA.lineTo(rx + dx, ry + dy);
+      ctxA.stroke();
+    }
+
+    ctxA.fillStyle = "#000";
+    ctxA.font = "12px sans-serif";
+    ctxA.fillText("t = " + t.toFixed(2) + " s", 10, h - 10);
+  }
+
+  function startAnim(tArr, phiArr, thetaArr) {
+    if (animTimer) clearInterval(animTimer);
+    let i = 0;
+    const N = tArr.length;
+    animTimer = setInterval(() => {
+      if (i >= N) i = 0;
+      rotorSpin += 0.3;
+      drawDrone(phiArr[i], thetaArr[i], tArr[i]);
+      i++;
+    }, 25);
+  }
+
+  // ---------- LQR gains ----------
+  function computeGains(h1, h2, r) {
+    const k_phi = h1 / r;
+    const k_p   = Math.sqrt(h2 * h2 + 2 * h1 * r) / r;
+    return { k_phi, k_p };
+  }
+
+  // ---------- Simulation ----------
+  function simulate() {
+    const m        = parseFloat(document.getElementById("mass").value);
+    const l        = parseFloat(document.getElementById("armLen").value);
+    const phi0Deg   = parseFloat(document.getElementById("phi0").value);
+    const theta0Deg = parseFloat(document.getElementById("theta0").value);
+    const h1Val    = parseFloat(document.getElementById("h1").value);
+    const h2Val    = parseFloat(document.getElementById("h2").value);
+    const rVal     = parseFloat(document.getElementById("r").value);
+
+    const J = 0.5 * m * l * l;
+    document.getElementById("tbl_m").textContent = m.toFixed(2);
+    document.getElementById("tbl_l").textContent = l.toFixed(2);
+    document.getElementById("tbl_J").textContent = J.toFixed(3);
+
+    let phi   = phi0Deg   * Math.PI / 180.0;
+    let theta = theta0Deg * Math.PI / 180.0;
+    let p = 0.0;
+    let q = 0.0;
+
+    const g = computeGains(h1Val, h2Val, rVal);
+    const k_phi = g.k_phi;
+    const k_p   = g.k_p;
+
+    const steps = Math.floor(SIM_T / DT);
+
+    const tArr        = [];
+    const phiArr      = [];
+    const thetaArr    = [];
+    const phiDegArr   = [];
+    const thetaDegArr = [];
+    const pArr        = [];
+    const qArr        = [];
+    const uPhiArr     = [];
+    const uThetaArr   = [];
+    const FphiArr     = [];
+    const FthetaArr   = [];
+
+    let V = 0.0;
+    const q_phi   = h1Val * h1Val;
+    const q_theta = h1Val * h1Val;
+    const q_p     = h2Val * h2Val;
+    const q_q     = h2Val * h2Val;
+    const r_u     = rVal * rVal;
+
+    for (let i = 0; i <= steps; i++) {
+      const t = i * DT;
+      tArr.push(t);
+
+      const u_phi   = -(k_phi * phi   + k_p * p);
+      const u_theta = -(k_phi * theta + k_p * q);
+
+      const inst =
+        q_phi   * phi   * phi +
+        q_theta * theta * theta +
+        q_p     * p     * p +
+        q_q     * q     * q +
+        r_u     * (u_phi * u_phi + u_theta * u_theta);
+
+      V += inst * DT;
+
+      const Fphi   = (J / l) * u_phi;
+      const Ftheta = (J / l) * u_theta;
+
+      phiDegArr.push(phi * 180.0 / Math.PI);
+      thetaDegArr.push(theta * 180.0 / Math.PI);
+      pArr.push(p);
+      qArr.push(q);
+      uPhiArr.push(u_phi);
+      uThetaArr.push(u_theta);
+      FphiArr.push(Fphi);
+      FthetaArr.push(Ftheta);
+      phiArr.push(phi);
+      thetaArr.push(theta);
+
+      phi   += p * DT;
+      p     += u_phi * DT;
+      theta += q * DT;
+      q     += u_theta * DT;
+    }
+
+    document.getElementById("tbl_V").textContent = V.toFixed(3);
+
+    // x 軸は linear なので {x:t, y:value} で渡す
+    respChart.data.datasets[0].data = tArr.map((t, i) => ({ x: t, y: phiDegArr[i]   }));
+    respChart.data.datasets[1].data = tArr.map((t, i) => ({ x: t, y: thetaDegArr[i] }));
+    respChart.update();
+
+    rateChart.data.datasets[0].data = tArr.map((t, i) => ({ x: t, y: pArr[i] }));
+    rateChart.data.datasets[1].data = tArr.map((t, i) => ({ x: t, y: qArr[i] }));
+    rateChart.update();
+
+    uChart.data.datasets[0].data = tArr.map((t, i) => ({ x: t, y: uPhiArr[i] }));
+    uChart.data.datasets[1].data = tArr.map((t, i) => ({ x: t, y: uThetaArr[i] }));
+    uChart.update();
+
+    fChart.data.datasets[0].data = tArr.map((t, i) => ({ x: t, y: FphiArr[i] }));
+    fChart.data.datasets[1].data = tArr.map((t, i) => ({ x: t, y: FthetaArr[i] }));
+    fChart.update();
+
+    startAnim(tArr, phiArr, thetaArr);
+  }
+
+  document.getElementById("runBtn").addEventListener("click", simulate);
+  simulate();
+</script>
+
+</body>
+</html>
